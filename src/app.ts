@@ -1,6 +1,6 @@
 import { withoutTrailingSlash } from 'ufo'
 import { lazyHandle, promisifyHandle } from './handle'
-import { toEventHandler, createEvent } from './event'
+import { toEventHandler, createEvent, H3CompatibilityEvent } from './event'
 import { createError, sendError } from './error'
 import { send, sendStream, isStream, MIMES } from './utils'
 import type { IncomingMessage, ServerResponse } from './types/node'
@@ -25,7 +25,7 @@ export interface InputLayer {
 
 export type InputStack = InputLayer[]
 
-export type Matcher = (url: string, req?: IncomingMessage) => boolean
+export type Matcher = (url: string, event?: H3CompatibilityEvent) => boolean
 
 export interface AppUse {
   (route: string | string [], handle: Middleware | Middleware[], options?: Partial<InputLayer>): App
@@ -44,7 +44,7 @@ export interface App {
 
 export interface AppOptions {
   debug?: boolean
-  onError?: (error: Error, req: IncomingMessage, res: ServerResponse) => any
+  onError?: (error: Error, event: H3CompatibilityEvent) => any
 }
 
 export function createApp (options: AppOptions = {}): App {
@@ -54,11 +54,12 @@ export function createApp (options: AppOptions = {}): App {
 
   // @ts-ignore
   const app: Partial<App> = function (req: IncomingMessage, res: ServerResponse) {
-    return _handle(req, res).catch((error: Error) => {
+    const event = createEvent(req, res)
+    return _handle(event).catch((error: Error) => {
       if (options.onError) {
-        return options.onError(error, req, res)
+        return options.onError(error, event)
       }
-      return sendError(res, error, !!options.debug)
+      return sendError(event, error, !!options.debug)
     })
   }
 
@@ -91,46 +92,44 @@ export function use (
   return app
 }
 
-export function createHandle (stack: Stack, options: AppOptions): PHandle {
+export function createHandle (stack: Stack, options: AppOptions) {
   const spacing = options.debug ? 2 : undefined
-  return async function handle (req: IncomingMessage, res: ServerResponse) {
-    const event = createEvent(req, res)
-
+  return async function handle (event: H3CompatibilityEvent) {
     // @ts-ignore express/connect compatibility
     req.originalUrl = req.originalUrl || req.url || '/'
-    const reqUrl = req.url || '/'
+    const reqUrl = event.req.url || '/'
     for (const layer of stack) {
       if (layer.route.length > 1) {
         if (!reqUrl.startsWith(layer.route)) {
           continue
         }
-        req.url = reqUrl.slice(layer.route.length) || '/'
+        event.req.url = reqUrl.slice(layer.route.length) || '/'
       } else {
-        req.url = reqUrl
+        event.req.url = reqUrl
       }
-      if (layer.match && !layer.match(req.url as string, req)) {
+      if (layer.match && !layer.match(event.req.url as string, event)) {
         continue
       }
       const val = await layer.handler(event)
-      if (res.writableEnded) {
+      if (event.res.writableEnded) {
         return
       }
       const type = typeof val
       if (type === 'string') {
-        return send(res, val, MIMES.html)
+        return send(event.res, val, MIMES.html)
       } else if (isStream(val)) {
-        return sendStream(res, val)
+        return sendStream(event.res, val)
       } else if (type === 'object' || type === 'boolean' || type === 'number' /* IS_JSON */) {
         if (val && (val as Buffer).buffer) {
-          return send(res, val)
+          return send(event.res, val)
         } else if (val instanceof Error) {
           throw createError(val)
         } else {
-          return send(res, JSON.stringify(val, null, spacing), MIMES.json)
+          return send(event.res, JSON.stringify(val, null, spacing), MIMES.json)
         }
       }
     }
-    if (!res.writableEnded) {
+    if (!event.res.writableEnded) {
       throw createError({ statusCode: 404, statusMessage: 'Not Found' })
     }
   }
